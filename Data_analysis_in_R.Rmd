@@ -1,0 +1,893 @@
+---
+title: "extraction_samples"
+output: html_document
+date: '2023-01-16'
+---
+setup and functions: 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=999)
+setwd("~/uni/semester 9 and 10/new_data/R")
+library(gridExtra)
+library(tidyverse)
+library(stringr)
+library(ggplot2)
+library(ggpubr)
+library(rlang)
+library(mapDK)
+library(ampvis2)
+
+```
+
+```{r helper functions}
+
+
+load_benchmark <- function(path){
+benchmark<- read.csv(path, sep=";", header = TRUE) %>%
+  drop_na(rss)%>%
+  mutate(cpu.time=as.numeric(cpu.time))%>%
+  mutate(record_id=as.numeric(record_id))%>%
+  mutate(ts=as.numeric(ts))%>%
+  mutate(num_threads=as.numeric(num_threads))%>%
+  mutate(rss=as.numeric(rss))
+}
+
+
+CPU_seconds <- function(data){
+benchmark<- data %>%
+  drop_na(rss)%>%
+  select(-cmdline)%>%
+  group_by(ppid) %>%
+  mutate(cpu.time=as.numeric(cpu.time))%>%
+  slice(which.max(cpu.time))
+
+print(sum(benchmark$cpu.time))
+}
+
+#load sintax
+load_sintax <- function(path, name) {
+  
+  sintax<- read.delim(path, sep="" , header = FALSE)%>%
+    select(-2,-3,-4)%>%
+    rename(Read_name = 1, taxonomy = 2)%>%
+    filter(!taxonomy == "")
+  
+names(sintax)[names(sintax) == "taxonomy"] <- name
+  return(sintax)
+}
+
+filter_sintax <- function(sintax_input){
+  
+  sintax <- sintax_input %>%
+    pivot_longer(cols = 2:2, names_to = "Source", values_to = "Taxonomy") %>%
+    separate(Taxonomy, into = paste0("tax", 1:7), sep = ",", extra = "merge", fill = "right") %>%
+    rename(Domain = tax1,
+         Phylum = tax2,
+         Class = tax3,
+         Order = tax4,
+         Family = tax5,
+         Genus = tax6,
+         Species = tax7)%>%
+    unique()%>%
+    mutate(rowsum = rowSums(is.na(.))) %>%
+    group_by(Read_name) %>%
+    slice(which.min(rowsum)) %>% 
+    select(-rowsum) %>%
+    ungroup()%>%
+    mutate(extracted_reads=nrow(.))%>%
+    mutate(read_ratio=(extracted_reads/72423150)*100)
+ 
+return(sintax)
+
+}
+
+##hmm
+add_hmm_model <- function(data, model){
+hmmer <- data %>%
+  mutate(hmm = model)%>%
+    relocate(hmm, .after = Source)%>%
+    select(-Source)%>%
+    rename(Source=hmm)
+  return(hmmer)
+}
+
+#load graftM
+
+
+#format and filter functions
+
+anotate_stat <- function(data, y , ...){
+  x <- c(...)
+  stats_annotated <- data %>%
+    select(-x) %>%
+    group_by(Source) %>%
+    summarise(across(.cols = everything(), .fns = num_annotated, .names = "{col}")) %>%
+    pivot_longer(cols = 2:y, names_to = "Taxonomy", values_to = "Count") %>%
+    arrange(desc(Source), by_group = TRUE) %>%
+    mutate(Taxonomy = factor(Taxonomy, unique(Taxonomy)),
+         Source = factor(Source, unique(Source)))
+  return(stats_annotated)    
+}
+
+compari_two_uncommon <- function(data1, data2, name1, name2){
+  names_common.A3 <- Reduce(intersect, list(data1$Read_name, data2$Read_name))
+  
+  lst.df.A3 <- lst(data1, data2)
+  
+  uncommon <- lst.df.A3 %>%
+    bind_rows() %>%
+    filter(!Read_name %in% names_common.A3)
+  
+  return(uncommon)
+}
+
+
+
+
+num_annotated <- function(x) {
+  length(x)-sum(is.na(x))
+}
+
+#display functions
+
+display_reads <- function(data, scale, ...){
+  x <- c(...)
+  
+ p.annotated <- data %>%
+  ggplot(aes(x = Taxonomy, 
+             y = Count, fill=Source)) +
+  geom_bar(stat = "identity", 
+           position = "dodge") +
+  geom_text(aes(label = Count), 
+            position = position_dodge(width = 0.9), 
+            vjust= -0.25) +
+  scale_y_continuous(n.breaks = 5, 
+                     limits = c(0, scale)) +
+  theme_bw(base_size = 12) +
+  scale_fill_manual(values = x,
+                    drop = FALSE)+
+  theme(title = element_text(face = "bold", size = 12),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.title.x=element_blank(),
+        legend.direction = "horizontal", legend.position = "bottom")
+} #done
+
+
+display_one_on_one <- function(data, scale, headline, dataColumn ,...){
+  x <- c(...)
+  dataColumn <- enquo(dataColumn)
+  
+ p.annotated <- data %>%
+  ggplot(aes(x = factor(Taxonomy, level = x_order), y = !!dataColumn, group=Source, fill=Source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = !!dataColumn), position = position_dodge(width = 0.9), vjust= -0.25) +
+   scale_y_continuous(n.breaks = 5, limits = c(0, scale)) +
+  theme_bw(base_size = 12) +
+  labs(title= headline)+
+      scale_fill_manual(values = x,
+                    drop = FALSE)+
+  theme(title = element_text(face = "bold", size = 12),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.title.x=element_blank(),
+        legend.direction = "horizontal", legend.position = "bottom")
+}
+
+
+#uniqe taxa 
+
+
+x_order <- c("Domain","Phylum", "Class", "Order", "Family", "Genus")
+
+get_unique_items_in_tibble_by_name <- function(data1, columnName) {
+ columnName <- enquo(columnName)
+  data1 %>% 
+    select(!!columnName) %>%
+    drop_na() %>%
+    distinct() %>%
+    unlist(use.names = FALSE)
+}
+
+get_number_common_and_distinct <- function(data1, data2) {
+  common <- intersect(data1, data2)
+  
+  diff1 <- setdiff(data1, common)
+  
+  diff2 <- setdiff(data2, common)
+  
+  return(list(common=length(common), only1=length(diff1), only2=length(diff2)))
+}
+
+get_number_of_common_and_distinct_in_tibble_column <- function(data1, data2, columnName) {
+  unique1 <- get_unique_items_in_tibble_by_name(data1, columnName)
+  unique2 <- get_unique_items_in_tibble_by_name(data2, columnName)
+  return(get_number_common_and_distinct(unique1, unique2))
+}
+
+build_plottable <- function(data1, name1, data2, name2, taxa = c("Phylum", "Class", "Order", "Family", "Genus")) {
+  # Declare layout of dataframe (but insert nothing)
+  frame <- data.frame(Taxonomy=character(0), Source=character(0), Count=numeric(0), Unique=numeric(0))
+  # Iterate taxonomies
+  for (taxonomy in taxa) {
+    # Calculate stuff
+    stuffs <- get_number_of_common_and_distinct_in_tibble_column(data1, data2, taxonomy)
+    # Append to frame the results of dataset a
+    frame[nrow(frame)+1, ] <- c(taxonomy, name1, (stuffs$common + stuffs$only1), stuffs$only1)
+    # Append to frame the results of dataset b
+    frame[nrow(frame)+1, ] <- c(taxonomy, name2, (stuffs$common + stuffs$only2), stuffs$only2)
+  }
+  frame$Count<-as.numeric(frame$Count)
+  frame$Unique<-as.numeric(frame$Unique)
+  frame$Taxonomy<-as.factor(frame$Taxonomy)
+  return(frame)
+}
+
+
+save_plot <- function(name, plot, brede, højde){
+  ggsave(
+  name,
+  plot = plot,
+  device = svg,
+  path = "C:/Users/Mette/Documents/uni/semester 9 and 10/pic",
+  scale = 1,
+  width = brede,
+  height = højde,
+  units = "cm", 
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL )
+} #done
+
+```
+
+```{r colors}
+BWA_color = "#760a5e"         #dark magenta
+bowtie2_color = "#1a0a76"     #dark blue 
+GraftM_color = "#0a7625"      #dark green
+sintax_color = "#755e0a"      #dark yellow
+HMMER_2022_color = "#760a0a"  #dark red
+HMMER_2015_color = "#f15b5b"  #red
+HMMER_db_color = "#f9b9b9"    #light red
+db99_color = "#ae8b0f"              #yellow
+silva_color= "#f2d364"              #light yellow
+
+
+
+extractors <- c( "BWA" = BWA_color,         
+                 "bowtie2" = bowtie2_color,
+                 "GraftM" = GraftM_color,
+                 "HMMER" = HMMER_2022_color )
+
+BWA_HMMER <- c("BWA" = BWA_color,
+               "HMMER" = HMMER_2022_color)
+
+hmms <- c("Seed Rfam14" = HMMER_2022_color,
+          "Seed Rfam12" = HMMER_2015_color, 
+          "Silva 138.1" = HMMER_db_color)
+
+hmms_Rfam <- c("Seed Rfam14" = HMMER_2022_color,
+          "Seed Rfam12" = HMMER_2015_color)
+
+
+
+classifiers <- c("Sintax" = sintax_color,
+                 "GraftM" = GraftM_color)
+
+databases_cluster <- c("97%" = sintax_color, 
+              "99%" = db99_color)
+
+
+databases_HSS <- c("Silva+HSS" = db99_color,
+                       "Silva" = silva_color)
+
+```
+
+load data:
+
+```{r load bowtie2 and sintax, echo=FALSE}
+
+bowtie_benchmark_path <- "~/uni/semester 9 and 10/new_data/With_CPU_use/db_data/benchmark/benchmark_bowtie.csv"
+
+bowtie_benchmark <- load_benchmark(bowtie_benchmark_path)
+
+
+
+ ##classification
+bowtie2_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/bowtie2/extraction/LIB-MJ050-H8.sintax" 
+
+sintax_bowtie <- load_sintax(bowtie2_classification_sti, "bowtie2")
+
+sintax_bowtie <- filter_sintax(sintax_bowtie)
+
+
+
+
+#remove unwanted values and data 
+rm(bowtie2_classification_sti)
+
+
+
+
+```
+
+```{r load BWA and sintax, echo=FALSE}
+ 
+BWA_benchmark_path <- "~/uni/semester 9 and 10/new_data/With_CPU_use/db_data/benchmark/benchmark_BWA.csv"
+
+BWA_benchmark <- load_benchmark(BWA_benchmark_path)
+
+
+
+
+
+
+ ##classifications sample
+BWA_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/BWA/extraction/LIB-MJ050-H8.sintax" 
+
+
+sintax_BWA <- load_sintax(BWA_classification_sti, "BWA")
+
+sintax_BWA <- filter_sintax(sintax_BWA)
+
+
+
+
+#remove unwanted values and data 
+rm(BWA_classification_sti)
+
+
+
+```
+
+```{r load GrafM and sintax, echo=FALSE}
+
+GraftM_ext_benchmark_path <- "~/uni/semester 9 and 10/new_data/With_CPU_use/db_data/benchmark/benchmark_graftm.csv"
+
+GraftM_ext_benchmark <- load_benchmark(GraftM_ext_benchmark_path)
+
+
+
+Sintax_benchmark_path <-"~/uni/semester 9 and 10/new_data/With_CPU_use/db_data/classification/benchmark_sintax_64.csv"
+
+sintax_benchmark <- load_benchmark(Sintax_benchmark_path)
+
+
+
+
+##classifications sample
+
+GraftM_forward_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/graftM/extraction/LIB-MJ050-H8_forward.sintax" #change when the sample is made
+GraftM_reverse_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/graftM/extraction/LIB-MJ050-H8_reverse.sintax"
+
+
+
+sintax_GraftM_forward <- load_sintax(GraftM_forward_classification_sti, "GraftM")
+sintax_GraftM_reverse <- load_sintax(GraftM_reverse_classification_sti, "GraftM")
+
+
+sintax_graftM <- bind_rows(sintax_GraftM_forward, sintax_GraftM_reverse)
+ 
+sintax_graftM <- filter_sintax(sintax_graftM)
+
+
+
+
+#remove unwanted values and data 
+rm(sintax_GraftM_forward, sintax_GraftM_reverse, GraftM_forward_classification_sti, GraftM_reverse_classification_sti)
+
+
+
+
+```
+
+```{r load hmmer_db and sintax, echo=FALSE}
+
+
+
+##classification
+
+hmmer_db_forward_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/hmmer/extraction/database_based/LIB-MJ050-H8_forward.sintax" #change when the sample is made
+hmmer_db_reverse_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/hmmer/extraction/database_based/LIB-MJ050-H8_reverse.sintax"
+
+
+
+sintax_hmmer_db_forward <- load_sintax(hmmer_db_forward_classification_sti, "hmmer")
+sintax_hmmer_db_reverse <- load_sintax(hmmer_db_reverse_classification_sti, "hmmer")
+
+
+sintax_hmmer_db <- bind_rows(sintax_hmmer_db_forward, sintax_hmmer_db_reverse)
+
+ 
+sintax_hmmer_db <- filter_sintax(sintax_hmmer_db)
+
+#remove unwanted variable
+rm(sintax_hmmer_db_forward, sintax_hmmer_db_reverse)
+rm(hmmer_db_forward_classification_sti, hmmer_db_reverse_classification_sti)
+
+
+```
+
+```{r load hmmer_seed2015 and sintax, echo=FALSE}
+
+#classification
+hmmer_seed2015_forward_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/hmmer/extraction/seed2015/LIB-MJ050-H8_forward.sintax" 
+hmmer_seed2015_reverse_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/hmmer/extraction/seed2015/LIB-MJ050-H8_reverse.sintax"
+
+
+sintax_hmmer_seed2015_forward <- load_sintax(hmmer_seed2015_forward_classification_sti, "hmmer")
+sintax_hmmer_seed2015_reverse <- load_sintax(hmmer_seed2015_reverse_classification_sti,"hmmer")
+
+
+sintax_hmmer_seed2015 <- bind_rows(sintax_hmmer_seed2015_forward, sintax_hmmer_seed2015_reverse)
+sintax_hmmer_seed2015 <- filter_sintax(sintax_hmmer_seed2015)
+
+#remove unwanted variable
+rm(sintax_hmmer_seed2015_forward, sintax_hmmer_seed2015_reverse)
+rm(hmmer_seed2015_forward_classification_sti, hmmer_seed2015_reverse_classification_sti)
+
+```
+
+```{r load hmmer_seed2022 and sintax, echo=FALSE}
+
+#computational demand data
+HMMER_benchmark_path <- "~/uni/semester 9 and 10/new_data/With_CPU_use/db_data/benchmark/benchmark_hammer.csv"
+
+HMMER_benchmark <- load_benchmark(HMMER_benchmark_path)
+
+
+#classification
+hmmer_seed2022_forward_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/hmmer/extraction/seed2022/LIB-MJ050-H8_forward.sintax" #change when the sample is made
+hmmer_seed2022_reverse_classification_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/classification/sintax/hmmer/extraction/seed2022/LIB-MJ050-H8_reverse.sintax"
+
+
+##ændre når graftM virker
+sintax_hmmer_seed2022_forward <- load_sintax(hmmer_seed2022_forward_classification_sti, "HMMER")
+sintax_hmmer_seed2022_reverse <- load_sintax(hmmer_seed2022_reverse_classification_sti, "HMMER")
+
+
+sintax_hmmer_seed2022 <- bind_rows(sintax_hmmer_seed2022_forward, sintax_hmmer_seed2022_reverse)
+sintax_hmmer_seed2022 <- filter_sintax(sintax_hmmer_seed2022)
+
+
+
+
+
+
+
+#remove unwanted values and data 
+rm(sintax_hmmer_seed2022_forward, sintax_hmmer_seed2022_reverse)
+rm(hmmer_seed2022_forward_classification_sti, hmmer_seed2022_reverse_classification_sti)
+
+
+
+```
+
+```{r load graftM, echo=FALSE}
+
+
+GraftM_class_benchmark_path <- "~/uni/semester 9 and 10/new_data/With_CPU_use/db_data/classification/benchmark_GraftM_class_64.csv"
+
+GlaftM_class_benchmark <- load_benchmark(GraftM_class_benchmark_path)
+
+
+
+
+#graftM classification 
+
+GraftM <- read.delim("~/uni/semester 9 and 10/new_data/With_CPU_use/classification/graftM/LIB-MJ050-H8-02_R1_fastp_read_tax_merged.tsv", sep="\t" , header = FALSE)%>%
+  rename(Read_name = 1,
+         Tax_string = 2) %>%
+  mutate(across(Tax_string, ~str_replace(., "Root; k", "d"))) %>%
+  mutate(across(Tax_string, ~str_replace_all(., "__", ":"))) %>%
+  mutate(across(Tax_string, ~str_replace_all(., "; ", ","))) %>%
+  mutate(GraftM = Tax_string)%>%
+    select(-2)%>%
+    filter(!GraftM == "Root")
+
+  
+GraftM <- filter_sintax(GraftM)
+
+
+
+
+
+```
+
+```{r load sintax 99 db, echo=FALSE}
+
+
+
+##classification
+
+sintax_99_db_forward_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/database/99/LIB-MJ050-H8_forward.sintax" #change when the sample is made
+sintax_99_db_reverse_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/database/99/LIB-MJ050-H8_reverse.sintax"
+
+ 
+sintax_99_db_forward <- load_sintax(sintax_99_db_forward_sti, "99%")
+sintax_99_db_reverse <- load_sintax(sintax_99_db_reverse_sti, "99%")
+
+
+sintax_99_db <- bind_rows(sintax_99_db_forward, sintax_99_db_reverse)
+
+ 
+sintax_99_db <- filter_sintax(sintax_99_db)
+
+#remove unwanted variable
+rm(sintax_99_db_forward, sintax_99_db_reverse, sintax_99_db_forward_sti, sintax_99_db_reverse_sti)
+
+
+
+```
+
+```{r load sintax 97 db, echo=FALSE}
+
+
+
+##classification
+
+sintax_97_db_forward_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/database/97/LIB-MJ050-H8_forward.sintax" #change when the sample is made
+sintax_97_db_reverse_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/database/97/LIB-MJ050-H8_reverse.sintax"
+
+
+ 
+sintax_97_db_forward <- load_sintax(sintax_97_db_forward_sti, "97%")
+sintax_97_db_reverse <- load_sintax(sintax_97_db_reverse_sti, "97%")
+
+
+sintax_97_db <- bind_rows(sintax_97_db_forward, sintax_97_db_reverse)
+
+ 
+sintax_97_db <- filter_sintax(sintax_97_db)
+
+#remove unwanted variable
+rm(sintax_97_db_forward, sintax_97_db_reverse, sintax_97_db_forward_sti, sintax_97_db_reverse_sti)
+
+
+
+```
+
+```{r load sintax silva db, echo=FALSE}
+
+
+
+##classification
+
+sintax_silva_db_forward_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/database/silva/LIB-MJ050-H8_forward.sintax" #change when the sample is made
+sintax_silva_db_reverse_sti <- "~/uni/semester 9 and 10/new_data/With_CPU_use/database/silva/LIB-MJ050-H8_reverse.sintax"
+
+
+sintax_silva_db_forward <- load_sintax(sintax_silva_db_forward_sti, "silva")
+sintax_silva_db_reverse <- load_sintax(sintax_silva_db_reverse_sti, "silva")
+
+
+sintax_silva_db <- bind_rows(sintax_silva_db_forward, sintax_silva_db_reverse)
+
+ 
+sintax_silva_db <- filter_sintax(sintax_silva_db)
+
+#remove unwanted variable
+rm(sintax_silva_db_forward, sintax_silva_db_reverse, sintax_silva_db_forward_sti, sintax_silva_db_reverse_sti)
+
+
+
+```
+
+```{r load MFD data, echo=FALSE}
+
+
+mfd_ampvis <- read_rds(file = "C:/Users/Mette/Documents/uni/semester 9 and 10/new_data/2022_10_10/2022-12-05_mfd-ampvis.rds")
+
+
+biowide1 <- mfd_ampvis %>% amp_filter_samples(!is.na(mfd_hab1), minreads = 1000, !fieldsample_barcode %in% c("MFD10791"))
+
+  
+
+#data analysis, move
+rm(mfd_ampvis)
+
+```
+
+data analyses 
+
+```{r hmms comparison , echo=FALSE}
+
+
+# model is added instead of the extractor. 
+sintax_hmmer_db_m <- add_hmm_model(sintax_hmmer_db, "Silva 138.1")
+sintax_hmmer_seed2015_m <- add_hmm_model(sintax_hmmer_seed2015, "Seed Rfam12")
+sintax_hmmer_seed2022_m <- add_hmm_model(sintax_hmmer_seed2022, "Seed Rfam14")
+
+
+##comparison of the classifications of all reads 
+
+
+hmmer_db <- anotate_stat(sintax_hmmer_db_m, 7, 1, 9, 10, 11 )
+hmmer_seed2015 <- anotate_stat(sintax_hmmer_seed2015_m, 7, 1, 9, 10, 11 )
+hmmer_seed2022 <- anotate_stat(sintax_hmmer_seed2022_m, 7, 1, 9, 10, 11 )
+
+all_hmms <- rbind(hmmer_db, hmmer_seed2015, hmmer_seed2022)
+
+display_hmms <- display_reads(all_hmms, 11000, hmms )
+
+hmm_all_read_plot <- annotate_figure(display_hmms, top = text_grob("Number of reads annotated at a given taxonomic level", size = 14))
+
+save_plot("hmm_all_reads.svg", hmm_all_read_plot, 23.1, 14.85 )
+
+rm(all_hmms, hmmer_seed2022, hmmer_seed2015, hmmer_db, hmm_all_read_plot, display_hmms)
+
+
+#####2 and 2 comparison of the two seed HMM's 
+seed22_15_uncommon <- compari_two_uncommon(sintax_hmmer_seed2022_m, sintax_hmmer_seed2015_m, "Seed Rfam14", "Seed Rfam12")
+seed22_15_uncommon_number <- anotate_stat(seed22_15_uncommon, 7, 1, 9, 10, 11)
+
+display_seed22_15_uncommon <- display_one_on_one(seed22_15_uncommon_number ,250, "Seed Rfam14 VS Seed Rfam12", Count, hmms_Rfam)
+
+hmm_one_on_one_22_15 <- ggarrange( display_seed22_15_uncommon,  
+          ncol = 1, nrow = 1,
+          common.legend = TRUE,legend="bottom")
+
+hmm_one_on_one_22_15_plot <- annotate_figure(hmm_one_on_one_22_15, top = text_grob("The number of unique reads between the two seed HMMs annotated at a given taxonomic level", size = 14))
+
+save_plot("22_15_unique_reads.svg",hmm_one_on_one_22_15_plot, 23.1, 16.335)
+
+
+rm(db_15_uncommon, db_15_uncommon_number,db_22_uncommon, db_22_uncommon_number, seed22_15_uncommon, seed22_15_uncommon_number, display_db_15_uncommon, display_db_22_uncommon, display_seed22_15_uncommon, hmm_one_on_one_all, hmm_one_on_one_all_plot, hmm_one_on_one_22_15, hmm_one_on_one_22_15_plot)
+
+
+
+
+
+
+```
+
+```{r extractor comparison, echo=FALSE}
+
+##comparison of the classifications of all reads
+
+
+BWA <- anotate_stat(sintax_BWA, 6, 3, 9, 1, 10, 11 )
+Bowtie2 <- anotate_stat(sintax_bowtie, 6, 3, 9, 1, 10, 11 )
+GraftM <- anotate_stat(sintax_graftM, 6, 3, 9, 1, 10, 11 )
+HMMER <- anotate_stat(sintax_hmmer_seed2022, 6, 3, 9, 1, 10, 11 )
+
+all_extractors <- rbind(BWA, Bowtie2, GraftM, HMMER)
+
+display_extractors <- display_reads(all_extractors, 10000, extractors )
+
+extractor_all_read_plot <- annotate_figure(display_extractors, top = text_grob("Number of reads annotated at a given taxonomic level", size = 14)) 
+
+save_plot("extractor_all_reads.svg",extractor_all_read_plot , 23.1, 14.85 )
+
+rm(all_extractors, BWA, Bowtie2, GraftM, HMMER, display_extractors, extractor_all_read_plot)
+
+
+##BWA by it self
+
+BWA <- anotate_stat(sintax_BWA, 7, 9, 1, 10, 11 )
+
+BWA_alone <- display_one_on_one(BWA, 365000, "BWA", Count, BWA_color)
+
+BWA_alone_plot <- annotate_figure(BWA_alone, top = text_grob("Number of reads, extraxted by BWA, annotated at a given taxonomic level"))
+
+save_plot("BWA_alone.svg", BWA_alone_plot , 23.1, 14.85 )
+
+rm(BWA_alone, BWA_alone_plot)
+
+
+#####one on one comparison of uncommon reads
+
+
+BWA_bowtie_uncommon <- compari_two_uncommon(sintax_BWA, sintax_bowtie, "BWA", "bowtie2")
+BWA_graftM_uncommon <- compari_two_uncommon(sintax_BWA, sintax_graftM, "BWA", "GraftM")
+BWA_hmmer_uncommon<- compari_two_uncommon(sintax_BWA, sintax_hmmer_seed2022, "BWA", "HMMER")
+bowtie_graftM_uncommon <- compari_two_uncommon(sintax_bowtie, sintax_graftM, "bowtie2", "GraftM")
+bowtie_hmmer_uncommon <- compari_two_uncommon(sintax_bowtie, sintax_hmmer_seed2022, "bowtie2", "HMMER")
+graftM_hmmer_uncommon<- compari_two_uncommon(sintax_graftM, sintax_hmmer_seed2022, "GraftM", "HMMER")
+
+BWA_bowtie_uncommon_number <- anotate_stat(BWA_bowtie_uncommon, 6, 3, 9, 1, 10, 11 )
+BWA_graftM_uncommon_number <- anotate_stat(BWA_graftM_uncommon, 6, 3, 9, 1, 10, 11)
+BWA_hmmer_uncommon_number <- anotate_stat(BWA_hmmer_uncommon, 6, 3, 9, 1, 10, 11)
+bowtie_graftM_uncommon_number <- anotate_stat(bowtie_graftM_uncommon, 6, 3, 9, 1, 10, 11)
+bowtie_hmmer_uncommon_number <- anotate_stat(bowtie_hmmer_uncommon, 6, 3, 9, 1, 10, 11)
+graftM_hmmer_uncommon_number <- anotate_stat(graftM_hmmer_uncommon, 6, 3, 9, 1, 10, 11)
+
+display_BWA_bowtie_uncommon <- display_one_on_one(BWA_bowtie_uncommon_number ,1200, "BWA VS Bowtie2", Count, extractors )
+display_BWA_graftM_uncommon <- display_one_on_one(BWA_graftM_uncommon_number ,300, "GraftM VS BWA", Count, extractors)
+display_BWA_hmmer_uncommon <- display_one_on_one(BWA_hmmer_uncommon_number ,300, "HMMER VS BWA", Count, extractors)
+display_bowtie_graftM_uncommon <- display_one_on_one(bowtie_graftM_uncommon_number ,1000, "GraftM VS Bowtie2", Count, extractors)
+display_bowtie_hmmer_uncommon <- display_one_on_one(bowtie_hmmer_uncommon_number ,1000, "HMMER VS Bowtie2", Count, extractors)
+display_graftM_hmmer_uncommon <- display_one_on_one(graftM_hmmer_uncommon_number ,1.5, "HMMER VS GraftM", Count, extractors)
+
+one_on_one_all <- ggarrange(display_BWA_bowtie_uncommon, display_BWA_graftM_uncommon, display_BWA_hmmer_uncommon, display_bowtie_graftM_uncommon, display_bowtie_hmmer_uncommon, display_graftM_hmmer_uncommon,
+          ncol = 1, nrow = 6,
+          common.legend = TRUE,legend="bottom")
+
+extractor_unique_reads_plot <- annotate_figure(one_on_one_all, top = text_grob("Number of unique reads, between the extraction tools, annotated at a given taxonomic level"))
+
+save_plot("extractor_unique_reads.svg",extractor_unique_reads_plot , 23.1, 32.67 )
+
+rm(BWA_bowtie_uncommon, BWA_bowtie_uncommon_number, BWA_graftM_uncommon, BWA_graftM_uncommon_number, BWA_hmmer_uncommon, BWA_hmmer_uncommon_number, bowtie_graftM_uncommon, bowtie_graftM_uncommon_number, bowtie_hmmer_uncommon, bowtie_hmmer_uncommon_number, graftM_hmmer_uncommon, graftM_hmmer_uncommon_number, display_bowtie_graftM_uncommon, display_bowtie_hmmer_uncommon, display_BWA_bowtie_uncommon, display_BWA_graftM_uncommon, display_BWA_hmmer_uncommon, display_graftM_hmmer_uncommon, one_on_one_all, extractor_unique_reads_plot)
+
+###taxa
+
+
+unique_taxa <- build_plottable(sintax_BWA, "BWA", sintax_hmmer_seed2022, "HMMER")
+
+fig <- display_one_on_one(unique_taxa, 450, "", Count, BWA_HMMER)
+
+BWA_HMMER_one_on_one_plot <- annotate_figure(fig, top = text_grob("Number of taxa for the extraction tools, at a given taxonomic level"))
+
+save_plot("display_BWA_HMMER_taxa.svg", BWA_HMMER_one_on_one_plot, 23.1, 16.335)
+
+rm(unique_taxa, fig, BWA_HMMER_one_on_one_plot)
+
+#####benchmarking
+CPU_seconds(bowtie_benchmark)
+
+CPU_seconds(BWA_benchmark)
+
+CPU_seconds(GraftM_ext_benchmark)
+
+CPU_seconds(HMMER_benchmark)
+
+
+max(bowtie_benchmark$num_threads)
+
+max(BWA_benchmark$num_threads)
+
+max(GraftM_ext_benchmark$num_threads)
+
+max(HMMER_benchmark$num_threads)
+
+
+max(bowtie_benchmark$rss)
+
+max(BWA_benchmark$rss)
+
+max(GraftM_ext_benchmark$rss)
+
+max(HMMER_benchmark$rss)
+
+```
+
+```{r classifier comparison , echo=FALSE}
+
+sintax <- add_hmm_model(sintax_graftM, "Sintax")
+
+rm(sintax_graftM)
+
+###all reads###
+
+Sintax_state <- anotate_stat(sintax, 7, 9, 1, 10, 11 )
+GraftM_state <- anotate_stat(GraftM, 7, 9, 1, 10, 11 )
+
+
+all_classifyers <- rbind(Sintax_state, GraftM_state)
+
+display_classifier <- display_reads(all_classifyers, 15000, classifiers )
+
+classifier_all_read_plot <- annotate_figure(display_classifier, top = text_grob("Number of reads annotated at a given taxonomic level", size = 14)) 
+
+save_plot("classifier_all_reads.svg",classifier_all_read_plot , 23.1, 14.85 )
+
+rm(all_classifyers, display_classifier, classifier_all_read_plot)
+
+
+###all taxa###
+unique_taxa <- build_plottable(sintax, "Sintax", GraftM, "GraftM")
+
+  
+
+fig <- display_one_on_one(unique_taxa, 400, "", Count, classifiers)
+sintax_graftM_one_on_one_plot <- annotate_figure(fig, top = text_grob("Number of taxa for the classification tools, at a given taxonomic level"))
+
+save_plot("display_sintax_graftM_taxa.svg", sintax_graftM_one_on_one_plot, 23.1, 16.335)
+
+rm(unique_taxa, fig, sintax_graftM_one_on_one_plot)
+###benchmarking###
+
+CPU_seconds(sintax_benchmark)
+
+CPU_seconds(GlaftM_class_benchmark)
+
+
+
+
+```
+
+```{r database comparison , echo=FALSE}
+
+sintax_97_db <- add_hmm_model(sintax_hmmer_seed2022, "97%")
+#######99% VS 97%
+
+##all reads
+
+
+db97_number <- anotate_stat(sintax_97_db , 7, 9, 1, 10, 11)
+db99_number <- anotate_stat(sintax_99_db , 7, 9, 1, 10, 11)
+
+db99_97 <- rbind(db97_number, db99_number)
+
+display_uncommon_99db_97db <- display_one_on_one(db99_97, 11000, "97% VS 99%", Count, databases_cluster )
+
+uncommon_99db_97db_one_on_one_plot <- annotate_figure(display_uncommon_99db_97db, top = text_grob("The number of reads annotated at a given taxonomic level", size = 14))##fix
+
+save_plot("diplay_database_99_97.svg", uncommon_99db_97db_one_on_one_plot, 23.1, 16.335)
+
+rm(db97_number, db99_number,db99_97, display_uncommon_99db_97db, uncommon_99db_97db_one_on_one_plot)
+
+
+
+## taxa
+unique_taxas <- build_plottable(sintax_97_db, "97%", sintax_99_db, "99%")
+
+fig <- display_one_on_one(unique_taxas ,410 , "97% VS 99%", Count , databases_cluster)
+fig <- annotate_figure(fig, top = text_grob("Number of taxa at a given taxonomic level"))
+
+save_plot("display_99_97_taxa.svg", fig, 23.1, 16.335)
+
+rm(unique_taxas, fig)
+
+
+
+
+
+
+
+###silva vs silva+biowide
+
+
+sintax_silva <- add_hmm_model(sintax_silva_db, "Silva")
+sintax_HSS <- add_hmm_model(sintax_99_db, "Silva+HSS")
+
+
+##all reads
+
+dbsilva_number <- anotate_stat(sintax_silva , 7, 9, 1, 10, 11)
+db99_number <- anotate_stat(sintax_HSS , 7, 9, 1, 10, 11)
+
+db99_silva <- rbind(dbsilva_number, db99_number)
+
+display_uncommon_99db_silvadb <- display_one_on_one(db99_silva, 11000, "Silva+HSS vs silva" , Count, databases_HSS )
+
+uncommon_99db_silvadb_one_on_one_plot <- annotate_figure(display_uncommon_99db_silvadb, top = text_grob("The number of reads annotated at a given taxonomic level", size = 14))##fix
+
+save_plot("diplay_database_biowide_silva.svg", uncommon_99db_silvadb_one_on_one_plot, 23.1, 16.335)
+
+rm(db97_number, db99_number,db99_97, display_uncommon_99db_97db, uncommon_99db_97db_one_on_one_plot)
+
+
+## taxa
+unique_taxas <- build_plottable(sintax_silva, "Silva", sintax_HSS, "Silva+HSS")
+
+fig <- display_one_on_one(unique_taxas ,410 , "Silva+HSS vs silva", Count , databases_HSS)
+fig <- annotate_figure(fig, top = text_grob("Number of taxa at a given taxonomic level"))
+
+save_plot("display_biowide_silva_taxa.svg", fig, 23.1, 16.335)
+
+rm(unique_taxas, fig)
+
+
+
+```
+
+ 
+```{r MFD data, echo=FALSE}
+#ensure there is enough memory
+gc()
+memory.limit(size=999999)
+
+#PCA plot
+amp_ordinate(biowide1, 
+             sample_color_by = "mfd_hab1", 
+             type = "PCA")
+#map of collections sites
+mapDK(detail = 'region', map.colour = "grey50", map.fill = "grey95") + 
+  geom_point(data = biowide1$metadata, 
+             aes(x = longitude, y = latitude, group = NA, color = mfd_hab1), size = 2) +
+  theme(legend.position = c(0.8,0.8))
+
+```
