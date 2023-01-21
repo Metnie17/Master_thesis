@@ -1,1 +1,2 @@
 # Master Thesis
+This github repository cotains all scripts used in the Marster thesis "Benchmarking Workflows for Taxonomic Classification of 10,000 Metagenomes (Microflora Danica)" by Mette Hallundbæk Nielsen. there are two sections, Bioinformatic that contains the scripts used on the AAU bioservers to run the tools being benchmarked and analysis that contains the R and Python script used to analyse the Taxonomic classification data. 
